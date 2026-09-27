@@ -30,6 +30,7 @@ import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import com.google.android.material.bottomsheet.BottomSheetDialog
+import org.json.JSONArray
 import org.json.JSONObject
 
 class MainActivity : Activity() {
@@ -42,6 +43,7 @@ class MainActivity : Activity() {
     private var detailed = false
     private var selectedFloor = 1
     private var focusedBuilding: Int? = null
+    private var isolatedBuilding: Int? = null
     private var pendingSearch: String? = null
     private var searchText = ""
     private val filters = linkedMapOf(
@@ -51,6 +53,8 @@ class MainActivity : Activity() {
     )
     private val visibleFilters = mutableMapOf<String, Boolean>()
     private var loadError: String? = null
+    private var mapFrame: FrameLayout? = null
+    private val availableFloors = linkedMapOf<Int, List<Int>>()
 
     private val dark get() = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
         Configuration.UI_MODE_NIGHT_YES
@@ -68,6 +72,7 @@ class MainActivity : Activity() {
         detailed = savedInstanceState?.getBoolean("detailed") ?: false
         selectedFloor = savedInstanceState?.getInt("floor") ?: 1
         focusedBuilding = savedInstanceState?.getInt("building", -1)?.takeIf { it > 0 }
+        isolatedBuilding = savedInstanceState?.getInt("isolatedBuilding", -1)?.takeIf { it > 0 }
         searchText = savedInstanceState?.getString("searchText") ?: ""
         filters.keys.forEach { visibleFilters[it] = savedInstanceState?.getBoolean("filter_$it") ?: true }
         try {
@@ -77,9 +82,15 @@ class MainActivity : Activity() {
                 .findAll(overviewSvg).map { it.groupValues[1].toInt() }.distinct().sorted().toList()
             floors = Regex("<g\\s+id=\"\\d+-(\\d+)\"")
                 .findAll(detailedSvg).map { it.groupValues[1].toInt() }.distinct().sorted().toList()
+            Regex("<g\\s+id=\"(\\d+)-(\\d+)\"").findAll(detailedSvg).forEach { match ->
+                val building = match.groupValues[1].toInt()
+                val floor = match.groupValues[2].toInt()
+                availableFloors[building] = ((availableFloors[building] ?: emptyList()) + floor).distinct().sorted()
+            }
             require(buildingIds.isNotEmpty()) { "В map1.svg не найдены корпуса" }
             require(floors.isNotEmpty()) { "В map2.svg не найдены группы этажей" }
             if (selectedFloor !in floors) selectedFloor = floors.first()
+            if (isolatedBuilding?.let { selectedFloor !in availableFloors[it].orEmpty() } == true) isolatedBuilding = null
         } catch (error: Exception) {
             loadError = error.message ?: "Не удалось открыть карты"
         }
@@ -114,6 +125,7 @@ class MainActivity : Activity() {
         outState.putBoolean("detailed", detailed)
         outState.putInt("floor", selectedFloor)
         outState.putInt("building", focusedBuilding ?: -1)
+        outState.putInt("isolatedBuilding", isolatedBuilding ?: -1)
         outState.putString("searchText", searchText)
         filters.keys.forEach { outState.putBoolean("filter_$it", visibleFilters[it] != false) }
         super.onSaveInstanceState(outState)
@@ -122,6 +134,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         mapView?.destroy()
         mapView = null
+        mapFrame = null
         super.onDestroy()
     }
 
@@ -149,7 +162,7 @@ class MainActivity : Activity() {
             root.addView(label(loadError ?: "Не удалось открыть карты", 16f, muted))
             return
         }
-        root.addView(modeSelector())
+        root.addView(if (isolatedBuilding != null) isolatedControls() else modeSelector())
         val web = createMapView()
         mapView = web
         val frame = FrameLayout(this).apply {
@@ -158,16 +171,18 @@ class MainActivity : Activity() {
             setPadding(2.dp(), 2.dp(), 2.dp(), 2.dp())
             addView(web, FrameLayout.LayoutParams(-1, -1))
         }
+        mapFrame = frame
         root.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f).apply {
             topMargin = 12.dp()
             bottomMargin = 14.dp()
         })
-        root.addView(quickAccess())
+        if (isolatedBuilding == null) root.addView(quickAccess())
+        updateDevelopmentCard()
     }
 
     private fun header(): LinearLayout = LinearLayout(this).apply {
         gravity = Gravity.CENTER_VERTICAL
-        addView(label("Карта кампуса", 23f, ink, bold = true),
+        addView(label(isolatedBuilding?.let { "Корпус $it · $selectedFloor этаж" } ?: "Карта УУНиТ", 23f, ink, bold = true),
             LinearLayout.LayoutParams(0, -2, 1f))
         addView(ImageView(this@MainActivity).apply {
             setImageResource(android.R.drawable.ic_menu_search)
@@ -186,11 +201,11 @@ class MainActivity : Activity() {
         orientation = LinearLayout.HORIZONTAL
         setPadding(0, 14.dp(), 0, 0)
         addView(button("Карта", !detailed) {
-            if (detailed) { detailed = false; showScreen() }
+            if (detailed) { detailed = false; isolatedBuilding = null; focusedBuilding = null; showScreen() }
         }.apply { textSize = 12f; setPadding(4.dp(), 0, 4.dp(), 0) },
             LinearLayout.LayoutParams(0, 44.dp(), 1f).apply { rightMargin = 5.dp() })
         addView(button("Этажи", detailed) {
-            if (!detailed) { detailed = true; showScreen() }
+            if (!detailed) { detailed = true; isolatedBuilding = null; focusedBuilding = null; showScreen() }
         }.apply { textSize = 12f; setPadding(4.dp(), 0, 4.dp(), 0) },
             LinearLayout.LayoutParams(0, 44.dp(), 1f).apply { rightMargin = if (detailed) 8.dp() else 0 })
         if (detailed) {
@@ -203,6 +218,7 @@ class MainActivity : Activity() {
                         selectedFloor = floor
                         floorButton.text = "$floor эт. ▾"
                         mapView?.evaluateJavascript("window.selectFloor($floor)", null)
+                        updateDevelopmentCard()
                         true
                     }
                 }
@@ -216,11 +232,98 @@ class MainActivity : Activity() {
         }
     }
 
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        val building = isolatedBuilding
+        if (building != null) {
+            isolatedBuilding = null
+            detailed = false
+            focusedBuilding = building
+            showScreen()
+            showFloorPicker(building)
+        } else {
+            super.onBackPressed()
+        }
+    }
+
+    private fun isolatedControls(): LinearLayout = LinearLayout(this).apply {
+        val building = isolatedBuilding ?: return@apply
+        setPadding(0, 14.dp(), 0, 0)
+        addView(button("‹  Этажи корпуса $building", false) {
+            isolatedBuilding = null
+            detailed = false
+            focusedBuilding = building
+            showScreen()
+            showFloorPicker(building)
+        }, LinearLayout.LayoutParams(0, 44.dp(), 1f).apply { rightMargin = 8.dp() })
+        addView(button("Слои", false) { showFiltersSheet() },
+            LinearLayout.LayoutParams(70.dp(), 44.dp()))
+    }
+
     // Replace only the compact controls; do not reload the SVG or reset its zoom.
     private fun refreshControls() {
         val old = root.getChildAt(1)
         root.removeViewAt(1)
         root.addView(modeSelector(), 1, old.layoutParams)
+    }
+
+    private fun showFloorPicker(building: Int) {
+        val dialog = Dialog(this)
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(20.dp(), 20.dp(), 20.dp(), 20.dp())
+            background = shape(surface, 22, border)
+            addView(label("Корпус $building", 21f, ink, bold = true))
+        }
+        val choices = availableFloors[building].orEmpty()
+        content.addView(label(if (choices.isEmpty()) "Схемы этажей в разработке" else "Выберите этаж", 14f, muted),
+            LinearLayout.LayoutParams(-1, 38.dp()))
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        choices.forEach { floor ->
+            list.addView(button("$floor этаж  ›", false) {
+                dialog.dismiss()
+                selectedFloor = floor
+                isolatedBuilding = building
+                focusedBuilding = building
+                detailed = true
+                showScreen()
+            }, LinearLayout.LayoutParams(-1, 48.dp()).apply { bottomMargin = 8.dp() })
+        }
+        content.addView(ScrollView(this).apply { addView(list) },
+            LinearLayout.LayoutParams(-1, -2).apply { height = minOf(choices.size * 56.dp(), 320.dp()) })
+        content.addView(button("Закрыть", false) { dialog.dismiss() },
+            LinearLayout.LayoutParams(-1, 44.dp()).apply { topMargin = 8.dp() })
+        dialog.setContentView(content)
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setLayout((resources.displayMetrics.widthPixels - 40.dp()).coerceAtMost(420.dp()),
+                WindowManager.LayoutParams.WRAP_CONTENT)
+        }
+    }
+
+    private fun updateDevelopmentCard() {
+        val frame = mapFrame ?: return
+        frame.findViewWithTag<View>("development")?.let { frame.removeView(it) }
+        val building = focusedBuilding ?: return
+        if (!detailed || isolatedBuilding != null || selectedFloor in availableFloors[building].orEmpty()) return
+        val card = LinearLayout(this).apply {
+            tag = "development"
+            orientation = LinearLayout.VERTICAL
+            setPadding(18.dp(), 14.dp(), 18.dp(), 14.dp())
+            background = shape(surface, 18, border)
+            elevation = 8.dp().toFloat()
+            addView(label("Корпус $building · $selectedFloor этаж", 16f, ink, bold = true))
+            addView(label("Схема этажа в разработке", 14f, muted),
+                LinearLayout.LayoutParams(-1, 28.dp()))
+            addView(button("Понятно", false) {
+                focusedBuilding = null
+                updateDevelopmentCard()
+            }, LinearLayout.LayoutParams(-1, 40.dp()).apply { topMargin = 4.dp() })
+        }
+        frame.addView(card, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply {
+            setMargins(16.dp(), 0, 16.dp(), 16.dp())
+        })
     }
 
     private fun showSearchDialog() {
@@ -317,8 +420,9 @@ class MainActivity : Activity() {
     }
 
     private fun searchRoom(query: String) {
-        if (!detailed) {
+        if (!detailed || isolatedBuilding != null) {
             detailed = true
+            isolatedBuilding = null
             focusedBuilding = null
             pendingSearch = query
             showScreen()
@@ -328,20 +432,57 @@ class MainActivity : Activity() {
     }
 
     private fun findRoomInMap(query: String) {
-        mapView?.evaluateJavascript("window.findRoom(${JSONObject.quote(query)})") { result ->
-            val parts = result?.trim('"')?.split('|') ?: emptyList()
-            if (parts.size != 2) {
+        mapView?.evaluateJavascript("window.roomMatches(${JSONObject.quote(query)})") { result ->
+            val matches = try { JSONArray(result ?: "[]") } catch (_: Exception) { JSONArray() }
+            if (matches.length() == 0) {
                 Toast.makeText(this, "Кабинет не найден", Toast.LENGTH_SHORT).show()
-                return@evaluateJavascript
+            } else if (matches.length() == 1) {
+                openRoom(query, matches.getJSONObject(0))
+            } else {
+                showRoomChoices(query, matches)
             }
-            val building = parts[0].toIntOrNull()
-            val floor = parts[1].toIntOrNull()
-            if (building != null && floor != null) {
-                focusedBuilding = building
-                selectedFloor = floor
-                visibleFilters["Rooms"] = true
-                refreshControls()
-            }
+        }
+    }
+
+    private fun openRoom(query: String, choice: JSONObject) {
+        val building = choice.getInt("building")
+        val floor = choice.getInt("floor")
+        mapView?.evaluateJavascript("window.findRoom(${JSONObject.quote(query)},$building,$floor)", null)
+        focusedBuilding = building
+        selectedFloor = floor
+        visibleFilters["Rooms"] = true
+        refreshControls()
+        updateDevelopmentCard()
+    }
+
+    private fun showRoomChoices(query: String, matches: JSONArray) {
+        val dialog = Dialog(this)
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(20.dp(), 18.dp(), 20.dp(), 20.dp())
+            background = shape(surface, 22, border)
+            addView(label("Кабинет $query", 20f, ink, bold = true))
+            addView(label("Выберите корпус и этаж", 14f, muted),
+                LinearLayout.LayoutParams(-1, 36.dp()))
+        }
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        for (i in 0 until matches.length()) {
+            val choice = matches.getJSONObject(i)
+            list.addView(button("Корпус ${choice.getInt("building")} · ${choice.getInt("floor")} этаж", false) {
+                dialog.dismiss()
+                openRoom(query, choice)
+            }, LinearLayout.LayoutParams(-1, 48.dp()).apply { bottomMargin = 8.dp() })
+        }
+        content.addView(ScrollView(this).apply { addView(list) },
+            LinearLayout.LayoutParams(-1, minOf(matches.length() * 56.dp(), 320.dp())))
+        content.addView(button("Отмена", false) { dialog.dismiss() },
+            LinearLayout.LayoutParams(-1, 44.dp()).apply { topMargin = 8.dp() })
+        dialog.setContentView(content)
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setLayout((resources.displayMetrics.widthPixels - 40.dp()).coerceAtMost(420.dp()),
+                WindowManager.LayoutParams.WRAP_CONTENT)
         }
     }
 
@@ -358,11 +499,13 @@ class MainActivity : Activity() {
         row.addView(button("Все", selected = false) {
             focusedBuilding = null
             mapView?.evaluateJavascript("window.resetMap()", null)
+            updateDevelopmentCard()
         }, LinearLayout.LayoutParams(-2, 48.dp()).apply { rightMargin = 8.dp() })
         buildingIds.forEach { id ->
             row.addView(button("$id", selected = false) {
                 focusedBuilding = id
                 mapView?.evaluateJavascript("window.focusBuilding($id)", null)
+                updateDevelopmentCard()
             }, LinearLayout.LayoutParams(-2, 48.dp()).apply { rightMargin = 8.dp() })
         }
         scroll.addView(row)
@@ -373,6 +516,7 @@ class MainActivity : Activity() {
         val svg = if (detailed) detailedSvg else overviewSvg
         val firstFloor = selectedFloor
         val focus = focusedBuilding ?: 0
+        val isolated = isolatedBuilding ?: 0
         val filterState = filters.keys.joinToString(",") { "\"$it\":${visibleFilters[it] != false}" }
         val color = String.format("#%06X", surface and 0xFFFFFF)
         val gridColor = getColor(R.color.ui_map_grid)
@@ -393,10 +537,22 @@ class MainActivity : Activity() {
             const initial=map.viewBox.baseVal;
             const full={x:initial.x,y:initial.y,w:initial.width,h:initial.height};
             const detailed=${if (detailed) "true" else "false"};
+            const isolated=$isolated;
             const floorGroups=[...map.querySelectorAll('g[id]')].filter(g=>/^\d+-\d+$/.test(g.id));
             const initialFilters={$filterState};
             let activeFloor=$firstFloor;
-            function changeView(x,y,w,h){ map.setAttribute('viewBox',[x,y,w,h].join(' ')); }
+            function changeView(x,y,w,h){
+              if(![x,y,w,h].every(Number.isFinite)||w<=0||h<=0)return;
+              // Keep the viewport's centre within the canvas, including after a manual pan.
+              function keepVisible(pos,size,start,span){
+                const inset=Math.min(size,span)*0.35;
+                const centre=Math.max(start+inset,Math.min(start+span-inset,pos+size/2));
+                return centre-size/2;
+              }
+              x=keepVisible(x,w,full.x,full.w);
+              y=keepVisible(y,h,full.y,full.h);
+              map.setAttribute('viewBox',[x,y,w,h].join(' '));
+            }
             let highlight=null;
             function clearHighlight(){if(highlight){highlight.remove();highlight=null;}}
             window.resetMap=function(){clearHighlight();changeView(full.x,full.y,full.w,full.h);};
@@ -445,23 +601,34 @@ class MainActivity : Activity() {
               // Always use the destination's preset scale, regardless of manual zoom.
               centerOn(b,b.width*1.16,b.height*1.16);
             };
-            window.findRoom=function(query){
-              const normalize=s=>String(s).toLowerCase().replace(/\s+/g,'')
-                .replace(/[–—]/g,'-').replace(/a/g,'а');
+            const normalize=s=>String(s).toLowerCase().replace(/\s+/g,'')
+              .replace(/[–—]/g,'-').replace(/Ð°/g,'а').replace(/a/g,'а');
+            window.roomMatches=function(query){
               const needle=normalize(query);
-              const room=[...map.querySelectorAll('text[id^="room-"]')].find(el=>{
+              const matches=[...map.querySelectorAll('text[id^="room-"]')].flatMap(el=>{
+                const name=normalize(el.textContent);
+                if(name!==needle && name.split('-').slice(1).join('-')!==needle)return [];
+                let parent=el.parentElement,match=null;
+                while(parent && parent!==map){
+                  match=/^(\d+)-(\d+)$/.exec(parent.id||'');
+                  if(match)break;
+                  parent=parent.parentElement;
+                }
+                return match?[{building:Number(match[1]),floor:Number(match[2])}]:[];
+              });
+              return matches.filter((item,index)=>matches.findIndex(other=>
+                other.building===item.building&&other.floor===item.floor)===index);
+            };
+            window.findRoom=function(query,building,floor){
+              const needle=normalize(query);
+              const group=map.querySelector('g[id="'+building+'-'+floor+'"]');
+              if(!group)return false;
+              const room=[...group.querySelectorAll('text[id^="room-"]')].find(el=>{
                 const name=normalize(el.textContent);
                 return name===needle || name.split('-').slice(1).join('-')===needle;
               });
-              if(!room)return '';
-              let parent=room.parentElement,match=null;
-              while(parent && parent!==map){
-                match=/^(\d+)-(\d+)$/.exec(parent.id||'');
-                if(match)break;
-                parent=parent.parentElement;
-              }
-              if(!match)return '';
-              window.selectFloor(Number(match[2]));
+              if(!room)return false;
+              window.selectFloor(Number(floor));
               window.setLayer('Rooms',true);
               const b=bounds(room);
               centerOn(b,Math.max(500,b.width*10),Math.max(380,b.height*14));
@@ -474,7 +641,7 @@ class MainActivity : Activity() {
               highlight.setAttribute('stroke-width','10');
               highlight.setAttribute('pointer-events','none');
               map.appendChild(highlight);
-              return match[1]+'|'+match[2];
+              return true;
             };
             function at(x,y){
               const p=map.createSVGPoint();p.x=x;p.y=y;
@@ -523,9 +690,9 @@ class MainActivity : Activity() {
                 const match=/^building-(\d+)$/.exec(id)||
                     /^building-label-(\d+)$/.exec(id)||
                     (detailed?/^(\d+)-\d+$/.exec(id):null);
-                if(match){
+                if(match && !isolated){
                   event.preventDefault();
-                  location.href='app://focus?id='+match[1];
+                  location.href=(detailed?'app://focus?id=':'app://floors?id=')+match[1];
                   return;
                 }
                 node=node.parentElement;
@@ -533,7 +700,17 @@ class MainActivity : Activity() {
             });
             window.selectFloor($firstFloor);
             Object.entries(initialFilters).forEach(([kind,visible])=>window.setLayer(kind,visible));
-            if($focus)requestAnimationFrame(()=>window.focusBuilding($focus));
+            if(isolated){
+              const group=map.querySelector('g[id="'+isolated+'-'+activeFloor+'"]');
+              if(group){
+                const campus=group.parentElement.parentElement;
+                [...campus.children].forEach(child=>{if(child!==group.parentElement)child.style.display='none'});
+                requestAnimationFrame(()=>{
+                  const b=bounds(group);
+                  if(b.width&&b.height)centerOn(b,b.width*1.18,b.height*1.18);
+                });
+              }
+            }else if($focus)requestAnimationFrame(()=>window.focusBuilding($focus));
           })();
           </script></body></html>"""
         return WebView(this).apply {
@@ -556,11 +733,17 @@ class MainActivity : Activity() {
                 }
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     val uri = request.url
-                    if (uri.scheme == "app" && uri.host == "focus") {
+                    if (uri.scheme == "app" && uri.host == "floors") {
+                        val id = uri.getQueryParameter("id")?.toIntOrNull()
+                        if (id != null && id in buildingIds) view.post { showFloorPicker(id) }
+                    } else if (uri.scheme == "app" && uri.host == "focus") {
                         val id = uri.getQueryParameter("id")?.toIntOrNull()
                         if (id != null && id in buildingIds) {
                             focusedBuilding = id
-                            view.post { view.evaluateJavascript("window.focusBuilding($id)", null) }
+                            view.post {
+                                view.evaluateJavascript("window.focusBuilding($id)", null)
+                                updateDevelopmentCard()
+                            }
                         }
                     }
                     return true
