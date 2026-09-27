@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ui_background">#F3F7F9</color>
+    <color name="ui_surface">#FFFFFF</color>
+    <color name="ui_text">#173447</color>
+    <color name="ui_muted">#637B89</color>
+    <color name="ui_accent">#176C89</color>
+    <color name="ui_on_accent">#FFFFFF</color>
+    <color name="ui_border">#DDE7EC</color>
+    <color name="ui_map_grid">#0F173447</color>
+</resources>

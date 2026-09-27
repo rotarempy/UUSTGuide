@@ -1,0 +1,16 @@
+<resources>
+    <style name="Base.Theme.UUST" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/ui_accent</item>
+        <item name="colorOnPrimary">@color/ui_on_accent</item>
+        <item name="colorSurface">@color/ui_surface</item>
+        <item name="colorOnSurface">@color/ui_text</item>
+        <item name="colorAccent">@color/ui_accent</item>
+        <item name="android:colorAccent">@color/ui_accent</item>
+        <item name="android:colorBackground">@color/ui_background</item>
+        <item name="android:windowBackground">@color/ui_background</item>
+    </style>
+
+    <style name="Theme.UUST" parent="Base.Theme.UUST">
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>
